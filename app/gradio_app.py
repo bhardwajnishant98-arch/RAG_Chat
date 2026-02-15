@@ -3,7 +3,6 @@
 Run locally with:
     python app/gradio_app.py
 """
-
 from __future__ import annotations
 
 import os
@@ -41,11 +40,12 @@ def get_chroma_collection():
     return client.get_or_create_collection(name=COLLECTION_NAME)
 
 
-def split_text_by_tokens(text: str, chunk_size: int = MAX_CHUNK_TOKENS, overlap: int = CHUNK_OVERLAP_TOKENS) -> list[str]:
+def split_text_by_tokens(
+    text: str, chunk_size: int = MAX_CHUNK_TOKENS, overlap: int = CHUNK_OVERLAP_TOKENS
+) -> list[str]:
     """Split text into overlapping token chunks using a simple sliding window."""
     encoding = tiktoken.get_encoding("cl100k_base")
     tokens = encoding.encode(text)
-
     chunks: list[str] = []
     step = max(chunk_size - overlap, 1)
 
@@ -74,14 +74,11 @@ def embed_texts(client: OpenAI, texts: Iterable[str], model: str) -> list[list[f
 def ingest_source_text(source_name: str, source_type: str, text: str) -> int:
     if not text.strip():
         raise ValueError("Loaded content is empty and cannot be ingested.")
-
     chunks = split_text_by_tokens(text)
     if not chunks:
         raise ValueError("No chunks were created from this source.")
-
     openai_client = get_openai_client()
     embeddings = embed_texts(openai_client, chunks, EMBEDDING_MODEL)
-
     collection = get_chroma_collection()
     existing_count = collection.count()
     ids = [f"doc_{existing_count + idx}" for idx in range(len(chunks))]
@@ -89,7 +86,6 @@ def ingest_source_text(source_name: str, source_type: str, text: str) -> int:
         {"source": source_name, "source_type": source_type, "chunk_index": idx}
         for idx in range(len(chunks))
     ]
-
     collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
     return len(chunks)
 
@@ -98,7 +94,6 @@ def list_sources() -> list[str]:
     collection = get_chroma_collection()
     if collection.count() == 0:
         return []
-
     result = collection.get(include=["metadatas"])
     labels = {
         f"{meta.get('source')} ({meta.get('source_type')})"
@@ -122,10 +117,8 @@ def answer_question(question: str, top_k: int = 4) -> tuple[str, str]:
     collection = get_chroma_collection()
     if collection.count() == 0:
         raise ValueError("No content has been ingested yet.")
-
     openai_client = get_openai_client()
     query_embedding = embed_texts(openai_client, [question], EMBEDDING_MODEL)[0]
-
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
@@ -136,30 +129,43 @@ def answer_question(question: str, top_k: int = 4) -> tuple[str, str]:
     metadatas = results.get("metadatas", [[]])[0]
 
     if not documents:
-        return "I couldn't find relevant information in the current knowledge base.", "No citations found."
+        return (
+            "I couldn't find relevant information in the current knowledge base.",
+            "No citations found.",
+        )
 
     context_parts: list[str] = []
     citations: list[str] = []
 
     for idx, (doc, meta) in enumerate(zip(documents, metadatas), start=1):
-        source = meta.get("source", "unknown source") if isinstance(meta, dict) else "unknown source"
-        source_type = meta.get("source_type", "unknown") if isinstance(meta, dict) else "unknown"
+        source = (
+            meta.get("source", "unknown source")
+            if isinstance(meta, dict)
+            else "unknown source"
+        )
+        source_type = (
+            meta.get("source_type", "unknown") if isinstance(meta, dict) else "unknown"
+        )
         citation_label = f"[{idx}] {source} ({source_type})"
         citations.append(citation_label)
-        context_parts.append(f"{citation_label}\n{doc}")
+        context_parts.append(citation_label + "\n" + doc)
 
+    context_text = "\n\n".join(context_parts)
     prompt = (
         "You are a helpful assistant answering from provided context only. "
         "If answer is missing, say you don't know. "
         "Include bracket citations like [1], [2].\n\n"
-        f"Question:\n{question}\n\n"
-        f"Context:\n{'\n\n'.join(context_parts)}"
+        + f"Question:\n{question}\n\n"
+        + f"Context:\n{context_text}"
     )
 
     completion = openai_client.chat.completions.create(
         model=CHAT_MODEL,
         messages=[
-            {"role": "system", "content": "Answer using only provided context and cite sources."},
+            {
+                "role": "system",
+                "content": "Answer using only provided context and cite sources.",
+            },
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
@@ -195,12 +201,10 @@ def ingest_youtube(url: str) -> tuple[str, str]:
 def ingest_uploaded_file(file_obj) -> tuple[str, str]:
     if file_obj is None:
         return "Please upload a file first.", sources_markdown()
-
     file_path = Path(file_obj)
     try:
         file_bytes = file_path.read_bytes()
         suffix = file_path.suffix.lower()
-
         if suffix == ".pdf":
             text = load_pdf_text(file_bytes)
         elif suffix == ".docx":
@@ -209,7 +213,6 @@ def ingest_uploaded_file(file_obj) -> tuple[str, str]:
             text = file_bytes.decode("utf-8", errors="ignore")
         else:
             raise ValueError("Unsupported file type. Use PDF, DOCX, or TXT.")
-
         count = ingest_source_text(file_path.name, suffix.replace(".", ""), text)
         return f"✅ Ingested {count} chunks from {file_path.name}.", sources_markdown()
     except Exception as exc:  # noqa: BLE001
@@ -243,31 +246,36 @@ def ask_question(question: str) -> tuple[str, str]:
 def build_interface() -> gr.Blocks:
     with gr.Blocks(title="knowledge-agent") as demo:
         gr.Markdown("# 📚 knowledge-agent")
-        gr.Markdown("Ingest web pages, YouTube transcripts, and files. Then ask cited questions.")
-
+        gr.Markdown(
+            "Ingest web pages, YouTube transcripts, and files. Then ask cited questions."
+        )
         if not os.getenv("OPENAI_API_KEY"):
-            gr.Markdown("⚠️ `OPENAI_API_KEY` is missing. Add it to `.env` before using the app.")
-
+            gr.Markdown(
+                "⚠️ `OPENAI_API_KEY` is missing. Add it to `.env` before using the app."
+            )
         with gr.Row():
             with gr.Column():
                 gr.Markdown("## Ingest content")
-                website_url = gr.Textbox(label="Website URL", placeholder="https://example.com/article")
+                website_url = gr.Textbox(
+                    label="Website URL", placeholder="https://example.com/article"
+                )
                 website_btn = gr.Button("Ingest website")
-
-                youtube_url = gr.Textbox(label="YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
+                youtube_url = gr.Textbox(
+                    label="YouTube URL", placeholder="https://www.youtube.com/watch?v=..."
+                )
                 youtube_btn = gr.Button("Ingest YouTube transcript")
-
-                upload_file = gr.File(label="Upload file (PDF, DOCX, TXT)", file_count="single", type="filepath")
+                upload_file = gr.File(
+                    label="Upload file (PDF, DOCX, TXT)",
+                    file_count="single",
+                    type="filepath",
+                )
                 upload_btn = gr.Button("Ingest uploaded file")
-
                 ingest_status = gr.Markdown()
-
             with gr.Column():
                 gr.Markdown("## Knowledge base")
-                sources_box = gr.Markdown(value=sources_markdown)
+                sources_box = gr.Markdown(value=sources_markdown())
                 clear_btn = gr.Button("Clear database")
                 clear_status = gr.Markdown()
-
         gr.Markdown("---")
         gr.Markdown("## Ask a question")
         question = gr.Textbox(label="Question", lines=4)
@@ -275,13 +283,23 @@ def build_interface() -> gr.Blocks:
         answer_box = gr.Markdown(label="Answer")
         citations_box = gr.Markdown(label="Citations")
 
-        website_btn.click(ingest_website, inputs=[website_url], outputs=[ingest_status, sources_box])
-        youtube_btn.click(ingest_youtube, inputs=[youtube_url], outputs=[ingest_status, sources_box])
-        upload_btn.click(ingest_uploaded_file, inputs=[upload_file], outputs=[ingest_status, sources_box])
-        clear_btn.click(clear_db_action, outputs=[clear_status]).then(sources_markdown, outputs=[sources_box])
-        ask_btn.click(ask_question, inputs=[question], outputs=[answer_box, citations_box])
+        website_btn.click(
+            ingest_website, inputs=[website_url], outputs=[ingest_status, sources_box]
+        )
+        youtube_btn.click(
+            ingest_youtube, inputs=[youtube_url], outputs=[ingest_status, sources_box]
+        )
+        upload_btn.click(
+            ingest_uploaded_file, inputs=[upload_file], outputs=[ingest_status, sources_box]
+        )
+        clear_btn.click(clear_db_action, outputs=[clear_status]).then(
+            sources_markdown, outputs=[sources_box]
+        )
+        ask_btn.click(
+            ask_question, inputs=[question], outputs=[answer_box, citations_box]
+        )
 
-    return demo
+        return demo
 
 
 if __name__ == "__main__":
