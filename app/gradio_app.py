@@ -1,0 +1,289 @@
+"""knowledge-agent Gradio app.
+
+Run locally with:
+    python app/gradio_app.py
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Iterable
+
+import chromadb
+import gradio as gr
+import tiktoken
+from dotenv import load_dotenv
+from openai import OpenAI
+
+from app.loaders.docx import load_docx_text
+from app.loaders.pdf import load_pdf_text
+from app.loaders.web import load_webpage_text
+from app.loaders.youtube import load_youtube_transcript
+
+load_dotenv()
+
+CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+STORAGE_DIR = Path("app/storage")
+COLLECTION_NAME = "knowledge_agent"
+MAX_CHUNK_TOKENS = 1000
+CHUNK_OVERLAP_TOKENS = 150
+
+
+def get_openai_client() -> OpenAI:
+    return OpenAI()
+
+
+def get_chroma_collection():
+    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(STORAGE_DIR))
+    return client.get_or_create_collection(name=COLLECTION_NAME)
+
+
+def split_text_by_tokens(text: str, chunk_size: int = MAX_CHUNK_TOKENS, overlap: int = CHUNK_OVERLAP_TOKENS) -> list[str]:
+    """Split text into overlapping token chunks using a simple sliding window."""
+    encoding = tiktoken.get_encoding("cl100k_base")
+    tokens = encoding.encode(text)
+
+    chunks: list[str] = []
+    step = max(chunk_size - overlap, 1)
+
+    for start in range(0, len(tokens), step):
+        end = start + chunk_size
+        chunk_tokens = tokens[start:end]
+        if not chunk_tokens:
+            continue
+        chunk_text = encoding.decode(chunk_tokens).strip()
+        if chunk_text:
+            chunks.append(chunk_text)
+        if end >= len(tokens):
+            break
+
+    return chunks
+
+
+def embed_texts(client: OpenAI, texts: Iterable[str], model: str) -> list[list[float]]:
+    text_list = list(texts)
+    if not text_list:
+        return []
+    response = client.embeddings.create(model=model, input=text_list)
+    return [item.embedding for item in response.data]
+
+
+def ingest_source_text(source_name: str, source_type: str, text: str) -> int:
+    if not text.strip():
+        raise ValueError("Loaded content is empty and cannot be ingested.")
+
+    chunks = split_text_by_tokens(text)
+    if not chunks:
+        raise ValueError("No chunks were created from this source.")
+
+    openai_client = get_openai_client()
+    embeddings = embed_texts(openai_client, chunks, EMBEDDING_MODEL)
+
+    collection = get_chroma_collection()
+    existing_count = collection.count()
+    ids = [f"doc_{existing_count + idx}" for idx in range(len(chunks))]
+    metadatas = [
+        {"source": source_name, "source_type": source_type, "chunk_index": idx}
+        for idx in range(len(chunks))
+    ]
+
+    collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
+    return len(chunks)
+
+
+def list_sources() -> list[str]:
+    collection = get_chroma_collection()
+    if collection.count() == 0:
+        return []
+
+    result = collection.get(include=["metadatas"])
+    labels = {
+        f"{meta.get('source')} ({meta.get('source_type')})"
+        for meta in result.get("metadatas", [])
+        if isinstance(meta, dict)
+    }
+    return sorted(labels)
+
+
+def clear_database() -> None:
+    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(STORAGE_DIR))
+    try:
+        client.delete_collection(name=COLLECTION_NAME)
+    except Exception:
+        pass
+    client.get_or_create_collection(name=COLLECTION_NAME)
+
+
+def answer_question(question: str, top_k: int = 4) -> tuple[str, str]:
+    collection = get_chroma_collection()
+    if collection.count() == 0:
+        raise ValueError("No content has been ingested yet.")
+
+    openai_client = get_openai_client()
+    query_embedding = embed_texts(openai_client, [question], EMBEDDING_MODEL)[0]
+
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=top_k,
+        include=["documents", "metadatas"],
+    )
+
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+
+    if not documents:
+        return "I couldn't find relevant information in the current knowledge base.", "No citations found."
+
+    context_parts: list[str] = []
+    citations: list[str] = []
+
+    for idx, (doc, meta) in enumerate(zip(documents, metadatas), start=1):
+        source = meta.get("source", "unknown source") if isinstance(meta, dict) else "unknown source"
+        source_type = meta.get("source_type", "unknown") if isinstance(meta, dict) else "unknown"
+        citation_label = f"[{idx}] {source} ({source_type})"
+        citations.append(citation_label)
+        context_parts.append(f"{citation_label}\n{doc}")
+
+    prompt = (
+        "You are a helpful assistant answering from provided context only. "
+        "If answer is missing, say you don't know. "
+        "Include bracket citations like [1], [2].\n\n"
+        f"Question:\n{question}\n\n"
+        f"Context:\n{'\n\n'.join(context_parts)}"
+    )
+
+    completion = openai_client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=[
+            {"role": "system", "content": "Answer using only provided context and cite sources."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+
+    answer = completion.choices[0].message.content or "No answer returned."
+    citation_text = "\n".join(f"- {item}" for item in citations)
+    return answer, citation_text
+
+
+def ingest_website(url: str) -> tuple[str, str]:
+    if not url.strip():
+        return "Please provide a website URL.", sources_markdown()
+    try:
+        text = load_webpage_text(url)
+        count = ingest_source_text(url, "web", text)
+        return f"✅ Ingested {count} chunks from website.", sources_markdown()
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ Website ingest failed: {exc}", sources_markdown()
+
+
+def ingest_youtube(url: str) -> tuple[str, str]:
+    if not url.strip():
+        return "Please provide a YouTube URL.", sources_markdown()
+    try:
+        text = load_youtube_transcript(url)
+        count = ingest_source_text(url, "youtube", text)
+        return f"✅ Ingested {count} chunks from YouTube transcript.", sources_markdown()
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ YouTube ingest failed: {exc}", sources_markdown()
+
+
+def ingest_uploaded_file(file_obj) -> tuple[str, str]:
+    if file_obj is None:
+        return "Please upload a file first.", sources_markdown()
+
+    file_path = Path(file_obj)
+    try:
+        file_bytes = file_path.read_bytes()
+        suffix = file_path.suffix.lower()
+
+        if suffix == ".pdf":
+            text = load_pdf_text(file_bytes)
+        elif suffix == ".docx":
+            text = load_docx_text(file_bytes)
+        elif suffix == ".txt":
+            text = file_bytes.decode("utf-8", errors="ignore")
+        else:
+            raise ValueError("Unsupported file type. Use PDF, DOCX, or TXT.")
+
+        count = ingest_source_text(file_path.name, suffix.replace(".", ""), text)
+        return f"✅ Ingested {count} chunks from {file_path.name}.", sources_markdown()
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ File ingest failed: {exc}", sources_markdown()
+
+
+def sources_markdown() -> str:
+    sources = list_sources()
+    if not sources:
+        return "No sources ingested yet."
+    return "\n".join(f"- {src}" for src in sources)
+
+
+def clear_db_action() -> str:
+    try:
+        clear_database()
+        return "✅ Database cleared."
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ Failed to clear database: {exc}"
+
+
+def ask_question(question: str) -> tuple[str, str]:
+    if not question.strip():
+        return "Please enter a question.", ""
+    try:
+        return answer_question(question)
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ Question answering failed: {exc}", ""
+
+
+def build_interface() -> gr.Blocks:
+    with gr.Blocks(title="knowledge-agent") as demo:
+        gr.Markdown("# 📚 knowledge-agent")
+        gr.Markdown("Ingest web pages, YouTube transcripts, and files. Then ask cited questions.")
+
+        if not os.getenv("OPENAI_API_KEY"):
+            gr.Markdown("⚠️ `OPENAI_API_KEY` is missing. Add it to `.env` before using the app.")
+
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("## Ingest content")
+                website_url = gr.Textbox(label="Website URL", placeholder="https://example.com/article")
+                website_btn = gr.Button("Ingest website")
+
+                youtube_url = gr.Textbox(label="YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
+                youtube_btn = gr.Button("Ingest YouTube transcript")
+
+                upload_file = gr.File(label="Upload file (PDF, DOCX, TXT)", file_count="single", type="filepath")
+                upload_btn = gr.Button("Ingest uploaded file")
+
+                ingest_status = gr.Markdown()
+
+            with gr.Column():
+                gr.Markdown("## Knowledge base")
+                sources_box = gr.Markdown(value=sources_markdown)
+                clear_btn = gr.Button("Clear database")
+                clear_status = gr.Markdown()
+
+        gr.Markdown("---")
+        gr.Markdown("## Ask a question")
+        question = gr.Textbox(label="Question", lines=4)
+        ask_btn = gr.Button("Get answer", variant="primary")
+        answer_box = gr.Markdown(label="Answer")
+        citations_box = gr.Markdown(label="Citations")
+
+        website_btn.click(ingest_website, inputs=[website_url], outputs=[ingest_status, sources_box])
+        youtube_btn.click(ingest_youtube, inputs=[youtube_url], outputs=[ingest_status, sources_box])
+        upload_btn.click(ingest_uploaded_file, inputs=[upload_file], outputs=[ingest_status, sources_box])
+        clear_btn.click(clear_db_action, outputs=[clear_status]).then(sources_markdown, outputs=[sources_box])
+        ask_btn.click(ask_question, inputs=[question], outputs=[answer_box, citations_box])
+
+    return demo
+
+
+if __name__ == "__main__":
+    app = build_interface()
+    app.launch(server_name="0.0.0.0", server_port=7860)
