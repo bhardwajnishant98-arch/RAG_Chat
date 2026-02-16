@@ -161,9 +161,9 @@ jobs:
   status:
     name: Deployment Status
   needs: [test, build, deploy-staging]
-  runs-on: ubuntu-latest    if: always()
-    steps:
-      - name: Check workflow status
+  runs-on: ubuntu-latest
+  if: always()
+  steps:
         run: |
           echo "🔍 Deployment Pipeline Status:"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
