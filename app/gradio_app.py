@@ -249,11 +249,131 @@ def ask_question(session_id: str, question: str) -> tuple[str, str]:
 
 
 def build_interface() -> gr.Blocks:
-    with gr.Blocks(title="knowledge-agent") as demo:
+    # Custom CSS for fancy background and rotating stars
+    custom_css = """
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+    
+    @keyframes rotate {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+    
+    @keyframes float {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-20px); }
+    }
+    
+    @keyframes twinkle {
+        0%, 100% { opacity: 0.3; }
+        50% { opacity: 1; }
+    }
+    
+    .gradio-container {
+        background: linear-gradient(135deg, #0a0e27 0%, #16213e 25%, #1a3a5e 50%, #16213e 75%, #0a0e27 100%);
+        background-size: 400% 400%;
+        animation: gradientShift 15s ease infinite;
+        font-family: 'Poppins', sans-serif;
+    }
+    
+    @keyframes gradientShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+    
+    .rotating-stars {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        width: 120px;
+        height: 120px;
+        opacity: 0.8;
+        animation: rotate 20s linear infinite;
+        pointer-events: none;
+        z-index: 1;
+    }
+    
+    .star {
+        position: absolute;
+        width: 4px;
+        height: 4px;
+        background: #ffd700;
+        border-radius: 50%;
+        animation: twinkle 3s ease-in-out infinite;
+        box-shadow: 0 0 10px rgba(255, 215, 0, 0.8);
+    }
+    
+    .star:nth-child(1) { top: 10%; left: 50%; animation-delay: 0s; }
+    .star:nth-child(2) { top: 25%; left: 85%; animation-delay: 0.3s; }
+    .star:nth-child(3) { top: 50%; left: 95%; animation-delay: 0.6s; }
+    .star:nth-child(4) { top: 75%; left: 85%; animation-delay: 0.9s; }
+    .star:nth-child(5) { top: 90%; left: 50%; animation-delay: 1.2s; }
+    .star:nth-child(6) { top: 75%; left: 15%; animation-delay: 1.5s; }
+    .star:nth-child(7) { top: 50%; left: 5%; animation-delay: 1.8s; }
+    .star:nth-child(8) { top: 25%; left: 15%; animation-delay: 2.1s; }
+    
+    h1, h2, h3 {
+        color: #fff;
+        text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+        animation: float 3s ease-in-out infinite;
+    }
+    
+    .gradio-button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border: none;
+        color: white;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .gradio-button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+    }
+    
+    .gradio-button[variant="primary"] {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    }
+    
+    .gradio-textbox, .gradio-file {
+        background: rgba(255, 255, 255, 0.1) !important;
+        border: 1.5px solid rgba(255, 215, 0, 0.3) !important;
+        color: white !important;
+    }
+    
+    .gradio-textbox input, .gradio-textbox textarea {
+        background: rgba(0, 0, 0, 0.3) !important;
+        color: white !important;
+    }
+    
+    .gradio-markdown {
+        color: #e0e0e0;
+    }
+    
+    .gradio-markdown h1, .gradio-markdown h2, .gradio-markdown h3 {
+        color: #ffd700;
+    }
+    """
+    
+    with gr.Blocks(title="knowledge-agent", css=custom_css, theme=gr.themes.Soft(primary_hue="purple")) as demo:
+        # Rotating stars container (Akash Ganga)
+        gr.HTML("""
+        <div class="rotating-stars">
+            <div class="star"></div>
+            <div class="star"></div>
+            <div class="star"></div>
+            <div class="star"></div>
+            <div class="star"></div>
+            <div class="star"></div>
+            <div class="star"></div>
+            <div class="star"></div>
+        </div>
+        """)
+        
         # Initialize session state with unique session ID
         session_id = gr.State(value=str(uuid.uuid4()))
         
-        gr.Markdown("# 📚 knowledge-agent")
+        gr.Markdown("# ✨ knowledge-agent")
         gr.Markdown(
             "Ingest web pages, YouTube transcripts, and files. Then ask cited questions."
         )
