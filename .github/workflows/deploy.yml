@@ -160,8 +160,8 @@ jobs:
 
   status:
     name: Deployment Status
-  needs: [test, build, deploy-staging]    runs-on: ubuntu-latest
-    if: always()
+  needs: [test, build, deploy-staging]
+  runs-on: ubuntu-latest    if: always()
     steps:
       - name: Check workflow status
         run: |
