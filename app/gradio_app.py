@@ -6,6 +6,7 @@ Run locally with:
 from __future__ import annotations
 
 import os
+import uuid
 from pathlib import Path
 from typing import Iterable
 
@@ -34,10 +35,12 @@ def get_openai_client() -> OpenAI:
     return OpenAI()
 
 
-def get_chroma_collection():
+def get_chroma_collection(session_id: str):
+    """Get or create a collection specific to a user session."""
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(STORAGE_DIR))
-    return client.get_or_create_collection(name=COLLECTION_NAME)
+    collection_name = f"knowledge_agent_{session_id}"
+    return client.get_or_create_collection(name=collection_name)
 
 
 def split_text_by_tokens(
@@ -71,7 +74,7 @@ def embed_texts(client: OpenAI, texts: Iterable[str], model: str) -> list[list[f
     return [item.embedding for item in response.data]
 
 
-def ingest_source_text(source_name: str, source_type: str, text: str) -> int:
+def ingest_source_text(session_id: str, source_name: str, source_type: str, text: str) -> int:
     if not text.strip():
         raise ValueError("Loaded content is empty and cannot be ingested.")
     chunks = split_text_by_tokens(text)
@@ -79,7 +82,7 @@ def ingest_source_text(source_name: str, source_type: str, text: str) -> int:
         raise ValueError("No chunks were created from this source.")
     openai_client = get_openai_client()
     embeddings = embed_texts(openai_client, chunks, EMBEDDING_MODEL)
-    collection = get_chroma_collection()
+    collection = get_chroma_collection(session_id)
     existing_count = collection.count()
     ids = [f"doc_{existing_count + idx}" for idx in range(len(chunks))]
     metadatas = [
@@ -90,8 +93,8 @@ def ingest_source_text(source_name: str, source_type: str, text: str) -> int:
     return len(chunks)
 
 
-def list_sources() -> list[str]:
-    collection = get_chroma_collection()
+def list_sources(session_id: str) -> list[str]:
+    collection = get_chroma_collection(session_id)
     if collection.count() == 0:
         return []
     result = collection.get(include=["metadatas"])
@@ -103,18 +106,20 @@ def list_sources() -> list[str]:
     return sorted(labels)
 
 
-def clear_database() -> None:
+def clear_database(session_id: str) -> None:
+    """Clear only the session-specific collection."""
     STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(STORAGE_DIR))
+    collection_name = f"knowledge_agent_{session_id}"
     try:
-        client.delete_collection(name=COLLECTION_NAME)
+        client.delete_collection(name=collection_name)
     except Exception:
         pass
-    client.get_or_create_collection(name=COLLECTION_NAME)
+    client.get_or_create_collection(name=collection_name)
 
 
-def answer_question(question: str, top_k: int = 4) -> tuple[str, str]:
-    collection = get_chroma_collection()
+def answer_question(session_id: str, question: str, top_k: int = 4) -> tuple[str, str]:
+    collection = get_chroma_collection(session_id)
     if collection.count() == 0:
         raise ValueError("No content has been ingested yet.")
     openai_client = get_openai_client()
@@ -176,31 +181,31 @@ def answer_question(question: str, top_k: int = 4) -> tuple[str, str]:
     return answer, citation_text
 
 
-def ingest_website(url: str) -> tuple[str, str]:
+def ingest_website(session_id: str, url: str) -> tuple[str, str]:
     if not url.strip():
-        return "Please provide a website URL.", sources_markdown()
+        return "Please provide a website URL.", sources_markdown(session_id)
     try:
         text = load_webpage_text(url)
-        count = ingest_source_text(url, "web", text)
-        return f"✅ Ingested {count} chunks from website.", sources_markdown()
+        count = ingest_source_text(session_id, url, "web", text)
+        return f"✅ Ingested {count} chunks from website.", sources_markdown(session_id)
     except Exception as exc:  # noqa: BLE001
-        return f"❌ Website ingest failed: {exc}", sources_markdown()
+        return f"❌ Website ingest failed: {exc}", sources_markdown(session_id)
 
 
-def ingest_youtube(url: str) -> tuple[str, str]:
+def ingest_youtube(session_id: str, url: str) -> tuple[str, str]:
     if not url.strip():
-        return "Please provide a YouTube URL.", sources_markdown()
+        return "Please provide a YouTube URL.", sources_markdown(session_id)
     try:
         text = load_youtube_transcript(url)
-        count = ingest_source_text(url, "youtube", text)
-        return f"✅ Ingested {count} chunks from YouTube transcript.", sources_markdown()
+        count = ingest_source_text(session_id, url, "youtube", text)
+        return f"✅ Ingested {count} chunks from YouTube transcript.", sources_markdown(session_id)
     except Exception as exc:  # noqa: BLE001
-        return f"❌ YouTube ingest failed: {exc}", sources_markdown()
+        return f"❌ YouTube ingest failed: {exc}", sources_markdown(session_id)
 
 
-def ingest_uploaded_file(file_obj) -> tuple[str, str]:
+def ingest_uploaded_file(session_id: str, file_obj) -> tuple[str, str]:
     if file_obj is None:
-        return "Please upload a file first.", sources_markdown()
+        return "Please upload a file first.", sources_markdown(session_id)
     file_path = Path(file_obj)
     try:
         file_bytes = file_path.read_bytes()
@@ -213,42 +218,46 @@ def ingest_uploaded_file(file_obj) -> tuple[str, str]:
             text = file_bytes.decode("utf-8", errors="ignore")
         else:
             raise ValueError("Unsupported file type. Use PDF, DOCX, or TXT.")
-        count = ingest_source_text(file_path.name, suffix.replace(".", ""), text)
-        return f"✅ Ingested {count} chunks from {file_path.name}.", sources_markdown()
+        count = ingest_source_text(session_id, file_path.name, suffix.replace(".", ""), text)
+        return f"✅ Ingested {count} chunks from {file_path.name}.", sources_markdown(session_id)
     except Exception as exc:  # noqa: BLE001
-        return f"❌ File ingest failed: {exc}", sources_markdown()
+        return f"❌ File ingest failed: {exc}", sources_markdown(session_id)
 
 
-def sources_markdown() -> str:
-    sources = list_sources()
+def sources_markdown(session_id: str) -> str:
+    sources = list_sources(session_id)
     if not sources:
         return "No sources ingested yet."
     return "\n".join(f"- {src}" for src in sources)
 
 
-def clear_db_action() -> str:
+def clear_db_action(session_id: str) -> str:
     try:
-        clear_database()
+        clear_database(session_id)
         return "✅ Database cleared."
     except Exception as exc:  # noqa: BLE001
         return f"❌ Failed to clear database: {exc}"
 
 
-def ask_question(question: str) -> tuple[str, str]:
+def ask_question(session_id: str, question: str) -> tuple[str, str]:
     if not question.strip():
         return "Please enter a question.", ""
     try:
-        return answer_question(question)
+        return answer_question(session_id, question)
     except Exception as exc:  # noqa: BLE001
         return f"❌ Question answering failed: {exc}", ""
 
 
 def build_interface() -> gr.Blocks:
     with gr.Blocks(title="knowledge-agent") as demo:
+        # Initialize session state with unique session ID
+        session_id = gr.State(value=str(uuid.uuid4()))
+        
         gr.Markdown("# 📚 knowledge-agent")
         gr.Markdown(
             "Ingest web pages, YouTube transcripts, and files. Then ask cited questions."
         )
+        gr.Markdown("*Each session has isolated knowledge base.*")
         if not os.getenv("OPENAI_API_KEY"):
             gr.Markdown(
                 "⚠️ `OPENAI_API_KEY` is missing. Add it to `.env` before using the app."
@@ -273,7 +282,7 @@ def build_interface() -> gr.Blocks:
                 ingest_status = gr.Markdown()
             with gr.Column():
                 gr.Markdown("## Knowledge base")
-                sources_box = gr.Markdown(value=sources_markdown())
+                sources_box = gr.Markdown(value="No sources ingested yet.")
                 clear_btn = gr.Button("Clear database")
                 clear_status = gr.Markdown()
         gr.Markdown("---")
@@ -284,19 +293,19 @@ def build_interface() -> gr.Blocks:
         citations_box = gr.Markdown(label="Citations")
 
         website_btn.click(
-            ingest_website, inputs=[website_url], outputs=[ingest_status, sources_box]
+            ingest_website, inputs=[session_id, website_url], outputs=[ingest_status, sources_box]
         )
         youtube_btn.click(
-            ingest_youtube, inputs=[youtube_url], outputs=[ingest_status, sources_box]
+            ingest_youtube, inputs=[session_id, youtube_url], outputs=[ingest_status, sources_box]
         )
         upload_btn.click(
-            ingest_uploaded_file, inputs=[upload_file], outputs=[ingest_status, sources_box]
+            ingest_uploaded_file, inputs=[session_id, upload_file], outputs=[ingest_status, sources_box]
         )
-        clear_btn.click(clear_db_action, outputs=[clear_status]).then(
-            sources_markdown, outputs=[sources_box]
+        clear_btn.click(clear_db_action, inputs=[session_id], outputs=[clear_status]).then(
+            sources_markdown, inputs=[session_id], outputs=[sources_box]
         )
         ask_btn.click(
-            ask_question, inputs=[question], outputs=[answer_box, citations_box]
+            ask_question, inputs=[session_id, question], outputs=[answer_box, citations_box]
         )
 
         return demo
